@@ -1,98 +1,154 @@
 import json
-from models import Author, Quote
-from mongoengine import connect
-from bson import ObjectId
-from dotenv import load_dotenv
 import os
 import sys
+from dotenv import load_dotenv
+from mongoengine import connect
+import redis  # Подключаем Redis
+from models import Author, Quote
 
 sys.stdout.reconfigure(encoding='utf-8')
 
 load_dotenv()
 
 MONGODB_URL = os.getenv('MONGO_URL')
-
 connect(db='quotes_db', host=MONGODB_URL)
 print('Connected to MongoDB!')
 
-steve_martin = ObjectId('6a2b188d9e5f64650205378e')
-alber_einshtein = ObjectId('6a2b188d9e5f64650205378d')
+redis_client = redis.StrictRedis(host='localhost', port=6379, decode_responses=True)
+try:
+    redis_client.ping()
+    print('Connected to Redis!')
+except redis.ConnectionError:
+    print('Warning: Redis is not running. Script will fail on cache operations.')
 
-                            
-def search_by_author(author_name):
-    if author_name == 'Steve Martin':
-        quotes = Quote.objects(author=steve_martin)
-        
-        for q in quotes:
-            print(q.quote)
-            
-    elif author_name == 'Albert Einstein':
-        quotes = Quote.objects(author=alber_einshtein)
-        
-        for q in quotes:
-            print(q.quote)
-            
+CACHE_TTL = 3600
 
-def search_by_tag(tag_name):
-    if tag_name:
-        quotes = Quote.objects(tags=tag_name)
-        
+
+def search_by_author(author_query):
+
+    query_clean = author_query.strip().lower()
+    cache_key = f"cache:name:{query_clean}"
+
+    cached_data = redis_client.get(cache_key)
+    if cached_data:
+        print(f"[Redis Cache HIT] Дані загружені з кешу для '{author_query}':")
+        quotes_list = json.loads(cached_data)
+        if not quotes_list:
+            print(f"Цитати автора {author_query} не знайдені.")
+            return
+        for q in quotes_list:
+            print(f'\t— {q}')
+        return
+
+    
+    authors = Author.objects(fullname__istartswith=query_clean)
+    
+    if not authors:
+        print(f"Автор '{author_query}', не знайдено в базі даних.")
+        redis_client.setex(cache_key, 60, json.dumps([]))
+        return
+
+
+    all_quotes = []
+    for author in authors:
+        quotes = Quote.objects(author=author)
         for q in quotes:
-            print(q.quote)        
-            
+            all_quotes.append(q.quote)
+
+    redis_client.setex(cache_key, CACHE_TTL, json.dumps(all_quotes))
+
+    if not all_quotes:
+        print(f"У знайдених авторах {author_query} не було цитат.")
+    else:
+        print(f"Цитати, знайдені по запиту '{author_query}':\n")
+        for q in all_quotes:
+            print(f'\t— {q}')
+
+
+def search_by_tag(tag_query):
+    
+    query_clean = tag_query.strip().lower()
+    cache_key = f"cache:tag:{query_clean}"
+
+    cached_data = redis_client.get(cache_key)
+    if cached_data:
+        print(f"[Redis Cache HIT] Дані завантажені з кешу для тега '{tag_query}':")
+        quotes_list = json.loads(cached_data)
+        if not quotes_list:
+            print(f"Цитати по тегу '{tag_query}' не знайдені.")
+            return
+        for q in quotes_list:
+            print(f"- {q['author']}: {q['quote']} (Теги: {q['tags']})")
+        return
+
+    print(f"[MongoDB Query] Поиск в базі даних...")
+    
+    quotes = Quote.objects(tags__istartswith=query_clean)
+
+    if not quotes:
+        print(f"Цитати з тегом, схожим на '{tag_query}', не знайдені.")
+        redis_client.setex(cache_key, 60, json.dumps([]))
+        return
+
+    formatted_quotes = []
+    for q in quotes:
+        formatted_quotes.append({
+            "author": q.author.fullname,
+            "quote": q.quote,
+            "tags": q.tags
+        })
+
+    redis_client.setex(cache_key, CACHE_TTL, json.dumps(formatted_quotes))
+
+    for q in formatted_quotes:
+        print(f"- {q['author']}: {q['quote']} (Теги: {q['tags']})")
+
 
 def search_by_tags(tags_string):
-    if tags_string:
-        
-        tags_list = [tag.strip() for tag in tags_string.split(',')]
-        
-        quotes = Quote.objects(tags__all=tags_list)
-        
-        for q in quotes:
-            print(q.quote)
+    
+    tags_list = [tag.strip() for tag in tags_string.split(',')]
+    quotes = Quote.objects(tags__in=tags_list)
+    
+    if not quotes:
+        print(f"Цитати, котрі містять теги {tags_string}, не знайдені.")
+        return
+
+    for q in quotes:
+        author_name = q.author.fullname
+        print(f"- {author_name}: {q.quote} (Теги: {q.tags})")
+
 
 def main():
-    print("Скрипт пошуку цитат запущено. Доступні команди: name:, tag:, tags:, exit")
+    print("Скрипт пошуку цитат запущен. Доступні команди: name:, tag:, tags:, exit")
     
     while True:
-        # Отримуємо введення від користувача та прибираємо зайві пробіли з кінців
         user_input = input("\nВведіть команду: ").strip()
         
-        # Перевірка на вихід
         if user_input.lower() == 'exit':
             print("Завершення роботи скрипту. До побачення!")
             break
             
-        # Перевіряємо, чи є двокрапка у введенні
         if ':' not in user_input:
             print("Помилка: Неправильний формат. Використовуйте формат 'команда: значення'.")
             continue
             
-        # Розділяємо команду та значення (максимум 1 розділення)
         command, value = user_input.split(':', 1)
         command = command.strip().lower()
         value = value.strip()
         
-        # Перевірка на порожнє значення
         if not value:
-            print("Помилка: Значення команди не може бути порожнім.")
+            print("Помилка: Значення команди не може быть порожнім.")
             continue
             
-        # Виклик відповідної логіки залежно від команди
         if command == 'name':
             search_by_author(value)
-        
         elif command == 'tag':
             search_by_tag(value)
-        
         elif command == 'tags':
             search_by_tags(value)
-        
         else:
             print(f"Помилка: Невідома команда '{command}'. Доступні: name, tag, tags, exit")
 
+
 if __name__ == "__main__":
     main()
-
-            
-        

@@ -7,6 +7,7 @@
     - json
     - pathlib
     - bson
+    - faker
 
 models.py - створення моделей
 

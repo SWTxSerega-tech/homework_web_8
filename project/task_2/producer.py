@@ -1,7 +1,7 @@
 import pika
 import json
 from faker import Faker
-from models import Contact
+from models_rabbit import Contact
 
 def main():
     fake = Faker() 

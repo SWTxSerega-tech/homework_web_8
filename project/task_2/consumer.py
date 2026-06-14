@@ -1,7 +1,7 @@
 import pika
 import json
 import time
-from models import Contact
+from models_rabbit import Contact
 
 def send_email_stub(fullname, email, subject):
     """Функція-заглушка для імітації надсилання листа."""
